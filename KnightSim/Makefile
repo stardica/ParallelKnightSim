@@ -1,5 +1,5 @@
 #nuber of threads
-NUM_THREADS = 16
+NUM_THREADS = 1
 HASHSIZE = 16
 THREADSIZE = 19 #make this max threads plus 3
 

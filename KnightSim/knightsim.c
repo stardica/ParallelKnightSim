@@ -11,30 +11,11 @@
 
 /* Globals*/
 list *ctxdestroylist = NULL;
-list *ctxlist = NULL;
 list *ecdestroylist = NULL;
-list *threadlist = NULL;
-
-context *last_context = NULL;
-context *current_context = NULL;
-context *ctxhint = NULL;
-context *curctx = NULL;
-context *terminated_context = NULL;
-
 eventcount *etime = NULL;
-
 jmp_buf context_init_halt_buf;
 
 long long ecid = 0;
-long long ctxid = 0;
-long long threadid = 0;
-
-pthread_barrier_t etime_barrier;
-pthread_barrier_t start_barrier;
-
-/*pthread_mutex_t barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t barrier_condition = PTHREAD_COND_INITIALIZER;*/
-
 unsigned int unique_context_id = 0;
 unsigned int num_columns =  NUM_THREADS - 1;
 
@@ -43,18 +24,12 @@ unsigned int num_columns =  NUM_THREADS - 1;
 context *ctx_hash_table[HASHSIZE][NUM_THREADS];
 volatile int ctx_hash_table_count = 0;
 
-//sim start
-/*bool KnightSim_finished = false;*/
-
 //table for thread counters
 thread threads[THREADSIZE];
 volatile int threads_created = 0;
 volatile int threads_running = NUM_THREADS;
 
 volatile bool global_barrier_sense = true;
-
-unsigned long long ks_start = 0;
-unsigned long long ks_end = 0;
 
 void KnightSim_init(void){
 
@@ -72,7 +47,6 @@ void KnightSim_init(void){
 
 	//other globals
 	ctxdestroylist = KnightSim_list_create(4);
-	//ctxlist = KnightSim_list_create(4);
 	ecdestroylist = KnightSim_list_create(4);
 
 	//set up etime
@@ -81,7 +55,7 @@ void KnightSim_init(void){
 	etime = eventcount_create(strdup(buff));
 
 	//create the thread pool
-	printf("---KnightSim Parallel Mode With %d threads---\n", NUM_THREADS);
+	printf("---Parallel KnightSim With %d threads---\n", NUM_THREADS);
 	thread_pool_create();
 
 	return;
@@ -89,16 +63,13 @@ void KnightSim_init(void){
 
 void thread_pool_create(void){
 
-	//init barrier
-	pthread_barrier_init(&etime_barrier, NULL, NUM_THREADS);
-	pthread_barrier_init(&start_barrier, NULL, NUM_THREADS + 1);
-
 	long i;
-	//create next thread
+
+	//create threads
 	for(i = 0; i < NUM_THREADS; i++)
 	{
 		pthread_create(&threads[i].thread, NULL, thread_start, (void *)i);
-		printf("---PDESim thread id %lu created---\n", i);
+		printf("---Parallel KnightSim Thread ID %lu Created---\n", i);
 	}
 
 	while(threads_created != NUM_THREADS){}; //spin till all of the threads are made
@@ -141,27 +112,18 @@ eventcount *eventcount_create(char *name){
 
 void ctx_hash_insert(context *context_ptr, unsigned int row, unsigned int col){
 
-	/*assert(context_ptr);
-	assert(context_ptr->batch_next == NULL);*/
-	/*start = rdtsc();*/
-
 	if(!ctx_hash_table[row][col])
 	{
 		//nothing here
 		ctx_hash_table[row][col] = context_ptr;
 		ctx_hash_table[row][col]->batch_next = NULL;
 		__sync_add_and_fetch(&ctx_hash_table_count, 1); //serialization point
-		/*end = rdtsc();
-		printf("time was %llu\n", end - start);*/
-		//printf("creating new record row %d col %d cycle %llu\n", row, col, etime->count);
 	}
 	else
 	{
 		//something here stick it at the head
-		/*assert(context_ptr->count == ctx_hash_table[where]->count);*/
 		context_ptr->batch_next = ctx_hash_table[row][col]; //set new ctx as head
 		ctx_hash_table[row][col] = context_ptr; //move old ctx down
-		//printf("adding to record row %d col %d cycle %llu\n", row, col, etime->count);
 	}
 
 	return;
@@ -202,10 +164,13 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 
 	context_init(new_context_ptr);
 
+	//printf("creating context id %d\n", new_context_ptr->id);
+
 	//start up new context
 #if defined(__linux__) && defined(__i386__)
 	if (!setjmp32_2(context_init_halt_buf))
 	{
+	  //printf("making long jump\n");
 	  longjmp32_2(new_context_ptr->buf, 1);
 	}
 #elif defined(__linux__) && defined(__x86_64)
@@ -217,20 +182,9 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 #error Unsupported machine/OS combination
 #endif
 
-	//changes
-	 //make sure the init is above any context create funcs
-	/*printf("thraeds %d\n", NUM_THREADS);*/
-
-	/*printf("%s row %d col %d\n", new_context_ptr->name,
-				(unsigned int) new_context_ptr->count & HASH_ROW_BY,
-				(unsigned int) new_context_ptr->unique_id & HASH_COL_BY);*/
-
 	ctx_hash_insert(new_context_ptr,
 					new_context_ptr->count & HASH_ROW_BY,
 					new_context_ptr->unique_id & HASH_COL_BY);
-
-	//put in etime's ctx list
-	//KnightSim_list_enqueue(etime->ctxlist, new_context_ptr);
 
 	//for destroying the context later
 	KnightSim_list_enqueue(ctxdestroylist, new_context_ptr);
@@ -244,8 +198,6 @@ void eventcount_init(eventcount * ec, count_t count, char *ecname){
 	ec->id = ecid++;
 	ec->count = count;
 	ec->ctx_list = NULL;
-	ec->ctxlist = KnightSim_list_create(4);
-	//pthread_mutex_init(&ec->count_mutex, NULL); //only used for parallel implementations
     return;
 }
 
@@ -281,8 +233,6 @@ void context_terminate(context * my_ctx){
 	}
 	else
 	{
-		//thread_recover();
-		//long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 	}
 
@@ -292,7 +242,6 @@ void context_terminate(context * my_ctx){
 void pause(count_t value, context * my_ctx){
 
 	//we only ever pause on etime.
-	//assert(my_ctx);
 
 	value += etime->count; //thread safe read of etime.count
 
@@ -300,14 +249,10 @@ void pause(count_t value, context * my_ctx){
 	context *head_ptr = my_ctx;
 	my_ctx = my_ctx->batch_next;
 
-	//head_ptr->count = value;
-
 	//insert the context into the hash table (its possible that contexts are reordering after being stolen).
 	ctx_hash_insert(head_ptr,
-			//(unsigned int) head_ptr->count & HASH_ROW_BY,
 			value & HASH_ROW_BY,
 			(unsigned int) head_ptr->unique_id & HASH_COL_BY);
-
 
 	if(!set_jump(head_ptr->buf)) //update current context
 	{
@@ -317,7 +262,6 @@ void pause(count_t value, context * my_ctx){
 		}
 		else
 		{
-			//thread_recover();
 			long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		}
 	}
@@ -346,15 +290,11 @@ void await(eventcount *ec, count_t value, context *my_ctx){
 
 		//set curr ctx to next ctx in list (NOTE MAYBE NULL!!)
 		my_ctx = my_ctx->batch_next;
-
-		//update the tail pointer in ec's ctx list
-		//ec->ctx_list->batch_next = NULL;
 	}
 	else
 	{
 		//there is an ec waiting.
-		fatal("await(): fixme handle more than one ctx in ec list name %s in ec %s id %d\n",
-				current_context->name, ec->ctx_list->name, ec->ctx_list->id);
+		fatal("await(): fixme handle more than one ctx in ec list\n");
 	}
 
 	if(!set_jump(ec->ctx_list->buf)) //update current context
@@ -365,7 +305,6 @@ void await(eventcount *ec, count_t value, context *my_ctx){
 		}
 		else //we are out of contexts so get the next batch
 		{
-			//thread_recover();
 			long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		}
 	}
@@ -376,11 +315,11 @@ void await(eventcount *ec, count_t value, context *my_ctx){
 
 
 void simulate(void){
-	//current_context = NULL;
-	//last_context = NULL;
 
 	/*unsigned int l = 0;
 	unsigned int j = 0;
+	current_context = NULL;
+	last_context = NULL;
 
 	for(l = 0; l < HASHSIZE; l ++)
 		for(j = 0 ; j < NUM_THREADS; j++)
@@ -394,23 +333,17 @@ void simulate(void){
 				current_context = current_context->batch_next;
 			}
 
-		}*/
-	//fatal("my count %d\n", ctx_hash_table_count);
+		}
+	fatal("my count %d\n", ctx_hash_table_count);
 
-	/*for(i = 0; i < NUM_THREADS; i++)
+	for(i = 0; i < NUM_THREADS; i++)
 		printf("col %d val %d\n", i, thread_hash_table_count[i]);*/
 
 	//start simulation
-	//pthread_barrier_wait(&start_barrier);
-
-	//printf("setting barrier %d\n", global_barrier_sense);
 	global_barrier_sense = false;
-
-	/*ks_start = rdtsc();*/
 
 	//wait for threads to finish
 	int i = 0;
-	//printf("waiting for threads\n");
 	for(i = 0; i < NUM_THREADS; i++)
 		pthread_join(threads[i].thread, NULL);
 
@@ -422,7 +355,6 @@ void simulate(void){
 
 void *thread_start(void *threadid){
 	//threads created we are ready to run.
-	//int arrival_count;
 	volatile bool local_barrier_sense = false;
 
 	long id = (long)threadid;
@@ -430,31 +362,21 @@ void *thread_start(void *threadid){
 	__sync_add_and_fetch(&threads_created, 1);
 
 	//barrier, wait for main to finish setting things up
-	//pthread_barrier_wait(&start_barrier);
-	//printf("gb %d lb %d\n", global_barrier_sense, local_barrier_sense);
-	while (global_barrier_sense != local_barrier_sense){}; //true & false
-														   //false & false
-
-	//printf("id %d made it\n", (int)id);
+	while (global_barrier_sense != local_barrier_sense){};
 
 	set_jump(threads[pthread_self() % THREADSIZE].home_buf);
 
-	local_barrier_sense = !local_barrier_sense;            //false and true
+	local_barrier_sense = !local_barrier_sense;
 
 	if(__sync_sub_and_fetch(&threads_running, 1)) //stall threads until last one arrives (last one is id 0)
 	{
-		//fatal("here gb %d lb %d\n", global_barrier_sense, local_barrier_sense);
 		while(global_barrier_sense != local_barrier_sense){};
-		//pthread_barrier_wait(&etime_barrier);
 	}
 	else
 	{
-		//printf("last to arive\n");
 		etime->count++; //last guy (id 0) so increment etime.count
 		threads_running = NUM_THREADS; //reset thread counter for next batch
-		//printf("-----------cycle------------ %llu\n", etime->count);
 		global_barrier_sense = local_barrier_sense;
-		//pthread_barrier_wait(&etime_barrier);
 	}
 
 	context_select(id);
@@ -463,36 +385,9 @@ void *thread_start(void *threadid){
 }
 
 
-/*void context_select(int id){
-
-	get next ctx to run
-	fatal("CS id %d\n", id);
-	context *next_context = ctx_hash_table[etime->count & HASH_ROW_BY][id];
-
-	if(next_context)
-	{
-		ctx_hash_table[etime->count & HASH_ROW_BY][id] = NULL;
-		//__sync_sub_and_fetch(&ctx_hash_table_count, 1); //serialization point 3
-
-		long_jump(next_context->buf); //off to context land
-	}
-	else
-	{
-		printf("really? id %d cycle %llu\n", id, CYCLE);
-		//thread_recover();
-		long_jump(threads[pthread_self() % THREADSIZE].home_buf);
-	}
-
-	ks_end = rdtsc();
-	printf("sim end %llu\n", ks_end - ks_start);
-	return;
-}*/
-
 void context_select(int id){
 
 	/*get next ctx to run*/
-	/*fatal("CS id %d\n", id);*/
-	//printf("running id %d cycle %llu\n", id, etime->count);
 	if(ctx_hash_table_count)
 	{
 		context *next_context = ctx_hash_table[etime->count & HASH_ROW_BY][id];
@@ -506,14 +401,10 @@ void context_select(int id){
 		}
 		else
 		{
-			//printf("really? id %d cycle %llu\n", id, CYCLE);
-			//thread_recover();
 			long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		}
 	}
 
-	/*ks_end = rdtsc();
-	printf("sim end %llu\n", ks_end - ks_start);*/
 	return;
 }
 
@@ -521,10 +412,9 @@ void context_start(void){
 
 	//figure out who we are using the dark arts! XD
 #if defined(__linux__) && defined(__x86_64)
-	long long address = get_stack_ptr64() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER);
+	unsigned long long address = get_stack_ptr64() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER);
 	context_data * context_data_ptr = (context_data *)address;
 
-	//jump
 	(*context_data_ptr->ctx_ptr->start)(context_data_ptr->ctx_ptr);
 
 	/*if current current ctx returns i.e. hits the bottom of its function
@@ -532,7 +422,16 @@ void context_start(void){
 	context_terminate(context_data_ptr->ctx_ptr);
 
 #else
-	fatal("context_start(): need to make get stack 32\n");
+
+	//32 bit is weird we have to hunt around for the struct need to subtract another 24 bytes.
+	unsigned long address = get_stack_ptr32() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER - 24);
+	context_data * context_data_ptr = (context_data *)address;
+
+	(*context_data_ptr->ctx_ptr->start)(context_data_ptr->ctx_ptr);
+
+	/*if current current ctx returns i.e. hits the bottom of its function
+	it will return here. So, terminate the context and move on*/
+	context_terminate(context_data_ptr->ctx_ptr);
 #endif
 
 	fatal("context_start(): Should never be here!\n");
@@ -540,12 +439,9 @@ void context_start(void){
 }
 
 void context_init_halt(context * my_ctx){
-
-//context has completed initial run jump back to init
-
-	//set up new context
+	//context has completed initial run jump back to init
 #if defined(__linux__) && defined(__i386__)
-	if (!setjmp32_2(current_context->buf))
+	if (!setjmp32_2(my_ctx->buf))
 	{
 	  longjmp32_2(context_init_halt_buf, 1);
 	}
@@ -557,7 +453,7 @@ void context_init_halt(context * my_ctx){
 #else
 #error Unsupported machine/OS combination
 #endif
-
+	return;
 }
 
 
@@ -617,8 +513,10 @@ void context_init(context *new_context){
 	don't move these out of this function!!!!*/
 
 	/*instruction pointer and then pointer to top of stack*/
-
 #if defined(__linux__) && defined(__i386__)
+
+	//printf("address is 0x%08x\n", ((int)((char*)new_context->stack + new_context->stacksize - MAGIC_STACK_NUMBER)));
+
 	new_context->buf[5] = ((int)context_start);
 	new_context->buf[4] = ((int)((char*)new_context->stack + new_context->stacksize - MAGIC_STACK_NUMBER));
 
@@ -640,7 +538,6 @@ void KnightSim_clean_up(void){
 	context *ctx_ptr = NULL;
 
 	//printf("KnightSim cleaning up\n");
-
 	LIST_FOR_EACH_L(ecdestroylist, i, 0)
 	{
 		ec_ptr = (eventcount*)KnightSim_list_get(ecdestroylist, i);
@@ -668,8 +565,6 @@ void KnightSim_clean_up(void){
 
 void context_destroy(context *ctx_ptr){
 
-	//printf("CTX destroying name %s count %llu\n", ctx_ptr->name, ctx_ptr->count);
-
 	assert(ctx_ptr != NULL);
 	ctx_ptr->start = NULL;
 	free(ctx_ptr->stack);
@@ -683,11 +578,7 @@ void context_destroy(context *ctx_ptr){
 
 void eventcount_destroy(eventcount *ec_ptr){
 
-	//printf("EC destroying name %s count %llu\n", ec_ptr->name, ec_ptr->count);
-
 	free(ec_ptr->name);
-	KnightSim_list_clear(ec_ptr->ctxlist);
-	KnightSim_list_free(ec_ptr->ctxlist);
 	free(ec_ptr);
 	ec_ptr = NULL;
 
@@ -697,7 +588,7 @@ void eventcount_destroy(eventcount *ec_ptr){
 void KnightSim_dump_queues(void){
 
 	int i = 0;
-	int j = 0;
+
 	eventcount *ec_ptr = NULL;
 	context *ctx_ptr = NULL;
 
@@ -709,14 +600,15 @@ void KnightSim_dump_queues(void){
 		ec_ptr = (eventcount*)KnightSim_list_get(ecdestroylist, i);
 
 		printf("ec name %s count %llu\n", ec_ptr->name, ec_ptr->count);
-		LIST_FOR_EACH_L(ec_ptr->ctxlist, j, 0)
-		{
-			ctx_ptr = (context *)KnightSim_list_get(ec_ptr->ctxlist, j);
-			printf("\tslot %d ctx %s ec count %llu ctx count %llu\n",
-					j, ctx_ptr->name, ec_ptr->count, ctx_ptr->count);
-		}
+
+		ctx_ptr = ec_ptr->ctx_list;
+
+		if(ctx_ptr)
+			printf("\tctx %s ec count %llu ctx count %llu\n",
+					ctx_ptr->name, ec_ptr->count, ctx_ptr->count);
 
 	}
+
 	printf("\n");
 
 	return;

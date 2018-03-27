@@ -6,7 +6,7 @@
 #include <knightsim.h>
 #include <rdtsc.h>
 
-#define EVENTS 512
+#define EVENTS 16
 #define TOTAL_CYCLES 1000001
 
 #define STACKSIZE 16384
@@ -73,16 +73,11 @@ void event(context * my_ctx){
 
 	while(CYCLE < TOTAL_CYCLES)
 	{
-		//printf("event %d cycle %llu\n", my_ctx->id, CYCLE);
-		//getchar();
-		//__sync_add_and_fetch(&iters, 1);
-		//iters++;
-		//sim_start = rdtsc();
-		while(i < 375)
-		     i++;
 
-		//printf("after %llu\n", rdtsc() - sim_start);
-		//getchar();
+		__sync_add_and_fetch(&iters, 1);
+
+		while(i < 375)
+			i++;
 
 		pause(1, my_ctx);
 		i = 0;

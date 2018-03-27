@@ -61,6 +61,7 @@ int setjmp32_2(jmp_buf __env);
 void longjmp32_2(jmp_buf __env, int val);
 int encode32(int val);
 int decode32(int val);
+long long get_stack_ptr32(void);
 
 #else
 #error Unsupported machine/OS combination
@@ -79,7 +80,6 @@ struct list_t{
 struct eventcount_t{
 	char * name;		/* string name of event count */
 	long long id;
-	struct list_t *ctxlist;
 	count_t count;		/* current value of event */
 	struct context_t *ctx_list;
 };
@@ -147,7 +147,6 @@ void await(eventcount *ec, count_t value, context *my_ctx);
 void advance(eventcount *ec, context *my_ctx);
 void pause(count_t value, context * my_ctx);
 void context_init_halt(context * my_ctx);
-void thread_recover(void);
 
 //KnightSim private functions
 void ctx_hash_insert(context *context_ptr, unsigned int row, unsigned int col);

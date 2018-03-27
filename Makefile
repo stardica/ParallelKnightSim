@@ -22,6 +22,5 @@ clean:
 	$(MAKE) -C $(KNIGHTSIM_DIR) clean
 	rm -f \
 	ProducerConsumer64 \
-	Arbiter64 \
-	Switch64 \
+	Event32 \
 	Event64

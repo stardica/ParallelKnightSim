@@ -8,17 +8,14 @@
 
 #define LATENCY 1
 
+
 /*
 #define NUMPAIRS 128
 #define LOOP 20
 */
 
-#define WORK 100000
-
-/*
 #define NUMPAIRS 256
-#define LOOP 4000000
-*/
+#define LOOP 100
 
 /*
 #define NUMPAIRS 512
@@ -35,8 +32,10 @@
 #define LOOP 500000
 */
 
+/*
 #define NUMPAIRS 4096
 #define LOOP 10000
+*/
 
 
 eventcount **ec_p;
@@ -68,22 +67,15 @@ int main(void){
 
 	consumer_init();
 
-	srand(NUMPAIRS);
-
-	//assert(ctxdestroylist->count >= NUM_THREADS);
-
 	/*starts simulation and won't return until simulation
 	is complete or all contexts complete*/
-
-	printf("DESIM: Simulating %d pair(s) and %d interactions\n", NUMPAIRS, LOOP);
+	printf("Simulating %d pair(s) and %d interactions\n", NUMPAIRS, LOOP);
 
 	sim_start = rdtsc();
 
 	simulate();
 
 	sim_time += (rdtsc() - sim_start);
-
-	/*printf("etime time %llu\n", etime_time);*/
 
 	//clean up
 	KnightSim_clean_up();
@@ -145,67 +137,22 @@ void consumer_init(void){
 
 void producer(context * my_ctx){
 	//START sequential code!!!!!
-
 	int my_pid = p_pid++;
-
-	/*count_t i = 1;*/
 	count_t j = 1;
-	int m = 0;
-
-	/*int iters = 0;*/
-
-	/*unsigned int finished_id = 0;*/
-
 	//END sequential code section!!!!!
 	context_init_halt(my_ctx);
-
-	/*fatal("in producer!\n");*/
-
-	//printf("producer %d:\n\t init\n", my_pid);
 
 	while(j <= LOOP)
 	{
 		//do work
-		//printf("\t charging latency %d cycle %llu\n", LATENCY, CYCLE);
-		//pause(rand() % LATENCY + 1, my_ctx);
 		pause(1, my_ctx);
 
-		//printf("producer_event %d cycle %llu\n", my_pid, CYCLE);
-
-		//__sync_add_and_fetch(&iters, 1);
-
-
-		for(m=0;m<WORK;m++)
-		{
-			iters++;
-		}
-		//printf("producer %d:\n", my_pid);
-		//printf("\t advancing %s cycle %llu\n", ec_c[my_pid]->name, CYCLE);
-
-		/*temp = rand() % LATENCY + 1;
-		temp++;*/
-
-		//printf("p after sync my pid %d\n", my_pid);
-
-		/*if(!my_ctx)
-			printf("ok found it\n");*/
+		__sync_add_and_fetch(&iters, 1);
 
 		advance(ec_c[my_pid], my_ctx);
 
-		//printf("after adv my pid %d\n", my_pid);
-
-		//printf("\t await %s cycle %llu\n", ec_p[my_pid]->name, CYCLE);
-		await(ec_p[my_pid], j, my_ctx);
-		j++;
-		//printf("producer %d:\n", my_pid);
-		//printf("\t advanced and doing work cycle %llu\n", CYCLE);
+		await(ec_p[my_pid], j++, my_ctx);
 	}
-
-	/*printf("here\n");*/
-
-	/*finished_id =  __sync_add_and_fetch(&finished, 1);
-	if(finished_id >= finished)
-		KnightSim_finished = true;*/
 
 	return;
 }
@@ -214,55 +161,21 @@ void consumer(context * my_ctx){
 	//START sequential code!!!!!
 	int my_pid = c_pid++;
 	count_t i = 1;
-
-	/*int iters = 0;*/
-
-	int m = 0;
-
-	/*int temp = 0;*/
-
 	//END sequential code section!!!!!
 	context_init_halt(my_ctx);
 
-	/*fatal("in consumer!\n");*/
-	//printf("consumer %d:\n\t init\n", my_pid);
-	/*if(my_ctx->id == 4)
-			e_start = rdtsc();*/
-
 	while(1)
 	{
-		//await work
-		//printf("\t await %s\n", ec_c[my_pid]->name);
-
-		await(ec_c[my_pid], i, my_ctx);
-		i++;
+		await(ec_c[my_pid], i++, my_ctx);
 
 		//charge latency
-		//printf("consumer %d:\n", my_pid);
-		//printf("\t charging latency %d cycle %llu\n", LATENCY, CYCLE);
-
-		/*temp = rand() % LATENCY + 1;
-		temp++;*/
-
-		//do work
 		pause(1, my_ctx);
-		//pause(rand() % LATENCY + 1, my_ctx);
-		//printf("consumer %d:\n\t resuming from latency cycle %llu\n",my_pid, CYCLE);
-		//printf("consumer_event %d cycle %llu\n", my_pid, CYCLE);
+		//do work
 
-		//__sync_add_and_fetch(&iters, 1);
-		for(m=0;m<WORK;m++)
-		{
-			iters++;
-		}
-
-		/*advance producer ctx*/
-		//printf("\t advancing %s cycle %llu\n", ec_p[my_pid]->name, CYCLE);
+		__sync_add_and_fetch(&iters, 1);
 
 		advance(ec_p[my_pid], my_ctx);
 	}
-
-	/*fatal("consumer should never exit cycle %llu\n", CYCLE);*/
 
 	return;
 }

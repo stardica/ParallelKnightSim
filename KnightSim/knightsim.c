@@ -11,18 +11,44 @@
 
 /* Globals*/
 list *ctxdestroylist = NULL;
+list *ctxlist = NULL;
 list *ecdestroylist = NULL;
+list *threadlist = NULL;
+
+context *last_context = NULL;
+context *current_context = NULL;
+context *ctxhint = NULL;
+context *curctx = NULL;
+context *terminated_context = NULL;
+
 eventcount *etime = NULL;
+
 jmp_buf context_init_halt_buf;
+jmp_buf thread_stub_buf;
 
 long long ecid = 0;
+long long ctxid = 0;
+long long threadid = 0;
+
+pthread_barrier_t etime_barrier;
+pthread_barrier_t start_barrier;
+
+/*pthread_mutex_t barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t barrier_condition = PTHREAD_COND_INITIALIZER;*/
+
 unsigned int unique_context_id = 0;
 unsigned int num_columns =  NUM_THREADS - 1;
+
+int KNIGHTSIM_THREAD_COUNT = 0;
 
 #define HASH_ROW_BY 0xF
 #define HASH_COL_BY num_columns
 context *ctx_hash_table[HASHSIZE][NUM_THREADS];
 volatile int ctx_hash_table_count = 0;
+context *hazard_ctx_hash_table[HASHSIZE][NUM_THREADS];
+
+//sim start
+/*bool KnightSim_finished = false;*/
 
 //table for thread counters
 thread threads[THREADSIZE];
@@ -30,6 +56,12 @@ volatile int threads_created = 0;
 volatile int threads_running = NUM_THREADS;
 
 volatile bool global_barrier_sense = true;
+
+unsigned long long ks_start = 0;
+unsigned long long ks_end = 0;
+
+//SpinLock mtx[NUM_THREADS];
+pthread_mutex_t mtx[NUM_THREADS];
 
 void KnightSim_init(void){
 
@@ -45,31 +77,52 @@ void KnightSim_init(void){
 		fatal("This is the optimized version of KnightSim.\n"
 				"NUM_THREADS = %d but must be 1 or a power of two.\n", NUM_THREADS);
 
+	//warning("---Currently there must be a context pausing 1 for each thread.---\n");
+	//warning("---it is unlikely that a simulator would be built without that anyways.---\n");
+
+	KNIGHTSIM_THREAD_COUNT = NUM_THREADS;
+
+	int i = 0;
+	int j = 0;
+
+	for(i = 0; i < HASHSIZE; i++)
+		for(j = 0; j < NUM_THREADS; j++)
+			hazard_ctx_hash_table[i][j] = NULL;
+
+	for(i = 0; i < NUM_THREADS; i++)
+		pthread_mutex_init(&mtx[i], NULL);
+
 	//other globals
 	ctxdestroylist = KnightSim_list_create(4);
+	//ctxlist = KnightSim_list_create(4);
 	ecdestroylist = KnightSim_list_create(4);
 
 	//set up etime
 	memset(buff,'\0' , 100);
 	snprintf(buff, 100, "etime");
-	etime = eventcount_create(strdup(buff));
+	etime = eventcount_create(strdup(buff), non_thread_safe);
 
 	//create the thread pool
-	printf("---Parallel KnightSim With %d threads---\n", NUM_THREADS);
+	printf("---KnightSim Parallel Mode With %d threads---\n", NUM_THREADS);
 	thread_pool_create();
+
+	//thread_stub();
 
 	return;
 }
 
 void thread_pool_create(void){
 
-	long i;
+	//init barrier
+	pthread_barrier_init(&etime_barrier, NULL, NUM_THREADS);
+	pthread_barrier_init(&start_barrier, NULL, NUM_THREADS + 1);
 
-	//create threads
+	long i;
+	//create next thread
 	for(i = 0; i < NUM_THREADS; i++)
 	{
 		pthread_create(&threads[i].thread, NULL, thread_start, (void *)i);
-		printf("---Parallel KnightSim Thread ID %lu Created---\n", i);
+		printf("---PDESim thread id %lu created---\n", i);
 	}
 
 	while(threads_created != NUM_THREADS){}; //spin till all of the threads are made
@@ -95,14 +148,14 @@ void thread_set_affinity(long core_id){
 }
 
 
-eventcount *eventcount_create(char *name){
+eventcount *eventcount_create(char *name, enum thread_safety_type type){
 
 	eventcount *ec_ptr = NULL;
 
 	ec_ptr = (eventcount *)malloc(sizeof(eventcount));
 	assert(ec_ptr);
 
-	eventcount_init(ec_ptr, 0, name);
+	eventcount_init(ec_ptr, 0, name, type);
 
 	//for destroying the ec later
 	KnightSim_list_insert(ecdestroylist, 0, ec_ptr);
@@ -112,26 +165,62 @@ eventcount *eventcount_create(char *name){
 
 void ctx_hash_insert(context *context_ptr, unsigned int row, unsigned int col){
 
+	/*assert(context_ptr);
+	assert(context_ptr->batch_next == NULL);*/
+	/*start = rdtsc();*/
+
 	if(!ctx_hash_table[row][col])
 	{
 		//nothing here
 		ctx_hash_table[row][col] = context_ptr;
 		ctx_hash_table[row][col]->batch_next = NULL;
 		__sync_add_and_fetch(&ctx_hash_table_count, 1); //serialization point
+		/*end = rdtsc();
+		printf("time was %llu\n", end - start);*/
+		//printf("creating new record row %d col %d cycle %llu\n", row, col, etime->count);
 	}
 	else
 	{
 		//something here stick it at the head
+		/*assert(context_ptr->count == ctx_hash_table[where]->count);*/
 		context_ptr->batch_next = ctx_hash_table[row][col]; //set new ctx as head
 		ctx_hash_table[row][col] = context_ptr; //move old ctx down
+		//printf("adding to record row %d col %d cycle %llu\n", row, col, etime->count);
 	}
 
 	return;
 }
 
+void ctx_hash_insert_hazard(context *context_ptr, unsigned int row, unsigned int col){
 
+	//printf("Entering ctx_hash_insert_hazard\n");
 
-void context_create(void (*func)(context *), unsigned stacksize, char *name, int id){
+	if(!hazard_ctx_hash_table[row][col])
+	{
+		//nothing here
+		hazard_ctx_hash_table[row][col] = context_ptr;
+		hazard_ctx_hash_table[row][col]->batch_next = NULL;	
+		hazard_ctx_hash_table[row][col]->batch_tail = hazard_ctx_hash_table[row][col];
+		//__sync_add_and_fetch(&ctx_hash_table_count, 1); //serialization point
+		/*end = rdtsc();
+		printf("time was %llu\n", end - start);*/
+		//printf("creating new record row %d col %d cycle %llu\n", row, col, etime->count);
+	}
+	else
+	{
+		//something here stick it at the head
+		/*assert(context_ptr->count == ctx_hash_table[where]->count);*/
+		context_ptr->batch_next = hazard_ctx_hash_table[row][col]; //set new ctx as head
+		hazard_ctx_hash_table[row][col] = context_ptr; //move old ctx down
+		hazard_ctx_hash_table[row][col]->batch_tail = hazard_ctx_hash_table[row][col]->batch_next->batch_tail;
+		//printf("adding to record row %d col %d cycle %llu\n", row, col, etime->count);
+	}
+
+	//printf("Exiting ctx_hash_insert_hazard\n");
+	return;
+}
+
+void context_create(void (*func)(context *), unsigned stacksize, char *name, int thread_id,  enum thread_safety_type type){
 
 	/*stacksize should be multiple of unsigned size */
 	assert ((stacksize % sizeof(unsigned)) == 0);
@@ -144,7 +233,12 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 
 	new_context_ptr->count = etime->count + 1 ; //start at cycle 1
 	new_context_ptr->name = name;
-	new_context_ptr->id = id;
+
+	if(thread_id < 0 || thread_id > num_columns)
+		fatal("context_create() bad thread id, check thread and ctx assignments\n");
+	new_context_ptr->thread_id = thread_id;
+	new_context_ptr->ts_type = type;
+
 	new_context_ptr->unique_id = unique_context_id++;
 	new_context_ptr->stack = (char *)malloc(stacksize);
 	assert(new_context_ptr->stack);
@@ -156,7 +250,7 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 	//move data unto the context's stack
 	context_data * context_data_ptr = (context_data *) malloc(sizeof(context_data));
 	context_data_ptr->ctx_ptr = new_context_ptr;
-	context_data_ptr->context_id = new_context_ptr->id;//new_context_ptr->id;
+	context_data_ptr->thread_id = new_context_ptr->thread_id;//new_context_ptr->id;
 
 	//copy data to context's stack then free the local copy.
 	memcpy((void *)new_context_ptr->stack, context_data_ptr, sizeof(context_data));
@@ -164,13 +258,10 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 
 	context_init(new_context_ptr);
 
-	//printf("creating context id %d\n", new_context_ptr->id);
-
 	//start up new context
 #if defined(__linux__) && defined(__i386__)
 	if (!setjmp32_2(context_init_halt_buf))
 	{
-	  //printf("making long jump\n");
 	  longjmp32_2(new_context_ptr->buf, 1);
 	}
 #elif defined(__linux__) && defined(__x86_64)
@@ -182,9 +273,21 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 #error Unsupported machine/OS combination
 #endif
 
+	//changes
+	 //make sure the init is above any context create funcs
+	/*printf("thraeds %d\n", NUM_THREADS);*/
+
+	/*printf("%s row %d col %d\n", new_context_ptr->name,
+				(unsigned int) new_context_ptr->count & HASH_ROW_BY,
+				(unsigned int) new_context_ptr->unique_id & HASH_COL_BY);*/
+
 	ctx_hash_insert(new_context_ptr,
 					new_context_ptr->count & HASH_ROW_BY,
-					new_context_ptr->unique_id & HASH_COL_BY);
+					new_context_ptr->thread_id);
+//					new_context_ptr->unique_id & HASH_COL_BY);
+
+	//put in etime's ctx list
+	//KnightSim_list_enqueue(etime->ctxlist, new_context_ptr);
 
 	//for destroying the context later
 	KnightSim_list_enqueue(ctxdestroylist, new_context_ptr);
@@ -192,31 +295,108 @@ void context_create(void (*func)(context *), unsigned stacksize, char *name, int
 	return;
 }
 
-void eventcount_init(eventcount * ec, count_t count, char *ecname){
+void eventcount_init(eventcount * ec, count_t count, char *ecname, enum thread_safety_type type){
 
 	ec->name = ecname;
 	ec->id = ecid++;
 	ec->count = count;
 	ec->ctx_list = NULL;
+	ec->ts_type = type;
+	ec->ctxlist = KnightSim_list_create(4);
+	//pthread_mutex_init(&ec->count_mutex, NULL); //only used for parallel implementations
+	//ec->lock.flag = 0;
+	pthread_mutex_init(&ec->lock, NULL); 
     return;
 }
 
 void advance(eventcount *ec, context *my_ctx){
 
-	/* advance the ec's count */
-	ec->count++;
+	assert(ec);
+	assert(my_ctx);
 
-	/*Check if there is a context and if it is ready to run*/
-	if(ec->ctx_list && ec->ctx_list->count == ec->count)
+	/* advance the ec's count */
+	if(ec->ts_type == non_thread_safe)
 	{
-		//there is a context on this ec and it's ready
-		ec->ctx_list->batch_next = my_ctx->batch_next;
-		my_ctx->batch_next = ec->ctx_list;
-		ec->ctx_list =  NULL;
+		ec->count++;
+
+		/*Check if there is a context and if it is ready to run*/
+		if(ec->ctx_list && ec->ctx_list->count == ec->count)
+		{
+			//there is a context on this ec and it's ready
+			ec->ctx_list->batch_next = my_ctx->batch_next;
+			my_ctx->batch_next = ec->ctx_list;
+			ec->ctx_list = NULL;
+
+			/*check for context thread_id
+			if not mine insert into ower's context batch as
+			context to run next cycle.*/
+
+			//need a lock here or something
+		}
+	}
+	else
+	{
+		/*CHRISTINA*/
+		/*if we are here we have designated this EC as a thread_safe ec
+		This means more than one thread may try to process an await
+		or advance on this ec simultaneously. We need to add a fine grain
+		lock here*/
+
+		//printf("advance(): %s fixme handle the thread safe ec type\n", my_ctx->name);
+
+		context *ctx_next = NULL;
+
+		//lock(ec->lock);
+		pthread_mutex_lock(&ec->lock);
+
+		ec->count++;
+
+		if(ec->ctx_list && ec->ctx_list->count == ec->count)
+		{
+			//there is a context on this ec and it's ready
+			ctx_next = ec->ctx_list;
+			ec->ctx_list =  NULL;
+		}
+
+		//unlock(ec->lock);
+		pthread_mutex_unlock(&ec->lock);
+
+		if(!ctx_next)
+			return;
+
+		/*check for context thread_id
+		if not mine insert into ower's context batch as
+		context to run next cycle.*/
+
+		//get the thread's id
+		int thread_id = threads[pthread_self() % THREADSIZE].thread_id;
+
+		//check to see if I am advancing another thread's ctx
+		if(ctx_next->thread_id == thread_id)
+		{
+			ctx_next->batch_next = my_ctx->batch_next;
+			my_ctx->batch_next = ctx_next;
+		}
+		else
+		{
+			assert(ctx_next->thread_id != thread_id);
+
+			//printf("advance(): thread advancing another thread's ctx\n");
+
+			//ok drop this context into the 2D hash table to run next cycle on the correct threads column
+
+			pthread_mutex_lock(&mtx[ctx_next->thread_id]);
+
+			//ctx_hash_insert_hazard(ctx_next, etime->count + 1, ctx_next->thread_id & NUM_THREADS);
+			ctx_hash_insert_hazard(ctx_next, etime->count + 1, ctx_next->thread_id); //TODO: Something wrong here
+
+			pthread_mutex_unlock(&mtx[ctx_next->thread_id]);
+		}
 	}
 
 	return;
 }
+
 
 
 void context_terminate(context * my_ctx){
@@ -233,6 +413,8 @@ void context_terminate(context * my_ctx){
 	}
 	else
 	{
+		//thread_recover();
+		//long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 	}
 
@@ -242,6 +424,7 @@ void context_terminate(context * my_ctx){
 void pause(count_t value, context * my_ctx){
 
 	//we only ever pause on etime.
+	//assert(my_ctx);
 
 	value += etime->count; //thread safe read of etime.count
 
@@ -249,10 +432,15 @@ void pause(count_t value, context * my_ctx){
 	context *head_ptr = my_ctx;
 	my_ctx = my_ctx->batch_next;
 
+	//head_ptr->count = value;
+
+	assert(head_ptr);
 	//insert the context into the hash table (its possible that contexts are reordering after being stolen).
 	ctx_hash_insert(head_ptr,
+			//(unsigned int) head_ptr->count & HASH_ROW_BY,
 			value & HASH_ROW_BY,
-			(unsigned int) head_ptr->unique_id & HASH_COL_BY);
+			(unsigned int) head_ptr->thread_id);
+			//(unsigned int) head_ptr->unique_id & HASH_COL_BY);
 
 	if(!set_jump(head_ptr->buf)) //update current context
 	{
@@ -262,6 +450,7 @@ void pause(count_t value, context * my_ctx){
 		}
 		else
 		{
+			//thread_recover();
 			long_jump(threads[pthread_self() % THREADSIZE].home_buf);
 		}
 	}
@@ -270,31 +459,78 @@ void pause(count_t value, context * my_ctx){
 }
 
 void await(eventcount *ec, count_t value, context *my_ctx){
+	//todo
+	//check for stack overflows
 
-	/*todo
-	check for stack overflows*/
-
-	/*continue if the ctx's count is less
-	 * than or equal to the ec's count*/
-	if (ec->count >= value)
-		return;
-
-	/*the current context must now wait on this ec to be incremented*/
-	if(!ec->ctx_list)
+	//continue if the ctx's count is less
+	// than or equal to the ec's count
+	assert(ec);
+	assert(my_ctx);
+	if(ec->ts_type == non_thread_safe)
 	{
-		//set the count to await
-		my_ctx->count = value;
+		if (ec->count >= value)
+			return;
 
-		//have ec point to halting context
-		ec->ctx_list = my_ctx;
+		//the current context must now wait on this ec to be incremented
+		if(!ec->ctx_list)
+		{
+			//set the count to await
+			my_ctx->count = value;
 
-		//set curr ctx to next ctx in list (NOTE MAYBE NULL!!)
-		my_ctx = my_ctx->batch_next;
+			//have ec point to halting context
+			ec->ctx_list = my_ctx;
+
+			//set curr ctx to next ctx in list (NOTE MAYBE NULL!!)
+			my_ctx = my_ctx->batch_next;
+		}
+		else
+		{
+			//there is an ec waiting.
+			//printf("await(): fixme handle more than one ctx in ec list\n");
+			fatal("await(): fixme handle more than one ctx in ec list\n");
+		}
 	}
 	else
 	{
-		//there is an ec waiting.
-		fatal("await(): fixme handle more than one ctx in ec list\n");
+		//printf("await(): %s await on ec thread safe ec type\n", my_ctx->name);
+		//fatal("await(): fixme handle the thread safe ec type");
+		
+
+		//CHRISTINA
+		//if we are here we have designated this EC as a thread_safe ec
+		//This means more than one thread may try to process an await
+		//or advance on this ec simultaneously. We need to add a fine grain
+		//lock here
+		//lock(ec->lock);
+		pthread_mutex_lock(&ec->lock);
+
+		if (ec->count >= value)
+		{
+			//unlock(ec->lock);
+			pthread_mutex_unlock(&ec->lock);
+			return;
+		}
+
+		//the current context must now wait on this ec to be incremented
+		if(!ec->ctx_list)
+		{
+			//set the count to await
+			my_ctx->count = value;
+
+			//have ec point to halting context
+			ec->ctx_list = my_ctx;
+
+			//set curr ctx to next ctx in list (NOTE MAYBE NULL!!)
+			my_ctx = my_ctx->batch_next;
+		}
+		else
+		{
+			//there is an ec waiting.
+			fatal("await(): fixme handle more than one ctx in ec list\n");
+		}
+
+		//unlock(ec->lock);
+		pthread_mutex_unlock(&ec->lock);
 	}
 
 	if(!set_jump(ec->ctx_list->buf)) //update current context
@@ -312,14 +548,12 @@ void await(eventcount *ec, count_t value, context *my_ctx){
 	return;
 }
 
-
-
 void simulate(void){
+	//current_context = NULL;
+	//last_context = NULL;
 
 	/*unsigned int l = 0;
 	unsigned int j = 0;
-	current_context = NULL;
-	last_context = NULL;
 
 	for(l = 0; l < HASHSIZE; l ++)
 		for(j = 0 ; j < NUM_THREADS; j++)
@@ -333,17 +567,23 @@ void simulate(void){
 				current_context = current_context->batch_next;
 			}
 
-		}
-	fatal("my count %d\n", ctx_hash_table_count);
+		}*/
+	//fatal("my count %d\n", ctx_hash_table_count);
 
-	for(i = 0; i < NUM_THREADS; i++)
+	/*for(i = 0; i < NUM_THREADS; i++)
 		printf("col %d val %d\n", i, thread_hash_table_count[i]);*/
 
 	//start simulation
+	//pthread_barrier_wait(&start_barrier);
+
+	//printf("setting barrier %d\n", global_barrier_sense);
 	global_barrier_sense = false;
+
+	/*ks_start = rdtsc();*/
 
 	//wait for threads to finish
 	int i = 0;
+	//printf("waiting for threads\n");
 	for(i = 0; i < NUM_THREADS; i++)
 		pthread_join(threads[i].thread, NULL);
 
@@ -352,43 +592,15 @@ void simulate(void){
 }
 
 
-
-void *thread_start(void *threadid){
-	//threads created we are ready to run.
-	volatile bool local_barrier_sense = false;
-
-	long id = (long)threadid;
-	thread_set_affinity(id);
-	__sync_add_and_fetch(&threads_created, 1);
-
-	//barrier, wait for main to finish setting things up
-	while (global_barrier_sense != local_barrier_sense){};
-
-	set_jump(threads[pthread_self() % THREADSIZE].home_buf);
-
-	local_barrier_sense = !local_barrier_sense;
-
-	if(__sync_sub_and_fetch(&threads_running, 1)) //stall threads until last one arrives (last one is id 0)
-	{
-		while(global_barrier_sense != local_barrier_sense){};
-	}
-	else
-	{
-		etime->count++; //last guy (id 0) so increment etime.count
-		threads_running = NUM_THREADS; //reset thread counter for next batch
-		global_barrier_sense = local_barrier_sense;
-	}
-
-	context_select(id);
-
-	return NULL;
-}
-
-
 void context_select(int id){
 
 	/*get next ctx to run*/
-	if(ctx_hash_table_count)
+	/*fatal("CS id %d\n", id);*/
+	//printf("running id %d cycle %llu\n", id, etime->count);
+
+	context *hazard_context = hazard_ctx_hash_table[etime->count & HASH_ROW_BY][id];
+
+	if(ctx_hash_table_count || hazard_context)
 	{
 		context *next_context = ctx_hash_table[etime->count & HASH_ROW_BY][id];
 
@@ -397,24 +609,178 @@ void context_select(int id){
 			ctx_hash_table[etime->count & HASH_ROW_BY][id] = NULL;
 			__sync_sub_and_fetch(&ctx_hash_table_count, 1); //serialization point 3
 
+			if(hazard_context)
+			{
+				hazard_ctx_hash_table[etime->count & HASH_ROW_BY][id] = NULL;
+				hazard_context->batch_tail->batch_next = next_context;
+				next_context = hazard_context;
+			}
+
+			//printf("context_select 1 thread_id = %d\n", (int) id);
+
+
 			long_jump(next_context->buf); //off to context land
+		}
+		else if(hazard_context)
+		{
+			//fatal("Triggered hazard_context\n");
+			hazard_ctx_hash_table[etime->count & HASH_ROW_BY][id] = NULL;
+			//next_context = hazard_context;
+
+			assert(hazard_context != NULL);
+
+			hazard_context->batch_tail = NULL;
+
+			//printf("context_select 2 thread_id = %d\n", (int) id);
+
+
+			long_jump(hazard_context->buf); //off to context land
 		}
 		else
 		{
+			//printf("really? id %d cycle %llu\n", id, CYCLE);
+			//thread_recover();
+
+			//printf("context_select 3 thread_id = %d\n", (int) id);
+
 			long_jump(threads[pthread_self() % THREADSIZE].home_buf);
+			//long_jump(thread_stub_buf);
 		}
 	}
 
+	//printf("context_select 3 thread_id = %d\n", (int) id);
+
+	/*if(hazard_context)
+		printf("hazard_context\n");
+
+	if(ctx_hash_table_count)
+		printf("ctx_hash_table_count %d\n", ctx_hash_table_count);*/
+
+	assert(hazard_context == NULL && ctx_hash_table_count == 0);
+
+	/*ks_end = rdtsc();
+	printf("sim end %llu\n", ks_end - ks_start);*/
 	return;
 }
+
+
+/*void thread_stub(void){
+
+//set up new context
+#if defined(__linux__) && defined(__i386__)
+	if (setjmp32_2(thread_stub_buf))
+	{
+	  longjmp32_2(threads[pthread_self() % THREADSIZE].home_buf, 1);
+	}
+#elif defined(__linux__) && defined(__x86_64)
+	if (setjmp64_2(thread_stub_buf))
+	{
+		longjmp64_2(threads[pthread_self() % THREADSIZE].home_buf, 1);
+	}
+#else
+#error Unsupported machine/OS combination
+#endif
+
+	return;
+}*/
+
+
+
+void *thread_start(void *threadid){
+	//threads created we are ready to run.
+	//int arrival_count;
+	volatile bool local_barrier_sense = false;
+
+	long id = (long)threadid;
+	thread_set_affinity(id);
+	__sync_add_and_fetch(&threads_created, 1);
+
+	threads[pthread_self() % THREADSIZE].thread_id = (int) id;
+
+	//barrier, wait for main to finish setting things up
+	//pthread_barrier_wait(&start_barrier);
+	//printf("gb %d lb %d\n", global_barrier_sense, local_barrier_sense);
+	while (global_barrier_sense != local_barrier_sense){}; //true & false
+														   //false & false
+	set_jump(threads[pthread_self() % THREADSIZE].home_buf);
+
+	local_barrier_sense = !local_barrier_sense;            //false and true
+
+	if(__sync_sub_and_fetch(&threads_running, 1)) //stall threads until last one arrives (last one is id 0)
+	{
+		//fatal("here gb %d lb %d\n", global_barrier_sense, local_barrier_sense);
+		//printf("thread_id = %d\n", (int) id);
+		while(global_barrier_sense != local_barrier_sense){}
+		//printf("id %d I am stuck dawg!!!\n", (int) id);
+	}
+	else
+	{
+	//	printf("thread_id = %d\n", (int) id);
+		//printf("last to arive\n");
+		etime->count++; //last guy (id 0) so increment etime.count
+		threads_running = NUM_THREADS; //reset thread counter for next batch
+	
+		//volatile int i = 0;
+
+
+		//unsigned long long sim_start = 0;
+		//unsigned long long sim_time = 0;
+
+		//sim_start = rdtsc();
+
+		//while(i < 300)
+		//	i++;
+
+		//sim_time += (rdtsc() - sim_start);
+
+		//fatal("End simulation time %llu cycles\n",
+			//sim_time);
+
+		//printf("-----------cycle------------ %llu\n", etime->count);
+		global_barrier_sense = local_barrier_sense;
+		//pthread_barrier_wait(&etime_barrier);
+	}
+
+	context_select(id);
+
+	return NULL;
+}
+
+
+/*void context_select(int id){
+
+	get next ctx to run
+	fatal("CS id %d\n", id);
+	context *next_context = ctx_hash_table[etime->count & HASH_ROW_BY][id];
+
+	if(next_context)
+	{
+		ctx_hash_table[etime->count & HASH_ROW_BY][id] = NULL;
+		//__sync_sub_and_fetch(&ctx_hash_table_count, 1); //serialization point 3
+
+		long_jump(next_context->buf); //off to context land
+	}
+	else
+	{
+		printf("really? id %d cycle %llu\n", id, CYCLE);
+		//thread_recover();
+		long_jump(threads[pthread_self() % THREADSIZE].home_buf);
+	}
+
+	ks_end = rdtsc();
+	printf("sim end %llu\n", ks_end - ks_start);
+	return;
+}*/
+
 
 void context_start(void){
 
 	//figure out who we are using the dark arts! XD
 #if defined(__linux__) && defined(__x86_64)
-	unsigned long long address = get_stack_ptr64() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER);
+	long long address = get_stack_ptr64() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER);
 	context_data * context_data_ptr = (context_data *)address;
 
+	//jump
 	(*context_data_ptr->ctx_ptr->start)(context_data_ptr->ctx_ptr);
 
 	/*if current current ctx returns i.e. hits the bottom of its function
@@ -422,16 +788,7 @@ void context_start(void){
 	context_terminate(context_data_ptr->ctx_ptr);
 
 #else
-
-	//32 bit is weird we have to hunt around for the struct need to subtract another 24 bytes.
-	unsigned long address = get_stack_ptr32() - (DEFAULT_STACK_SIZE - sizeof(context_data) - MAGIC_STACK_NUMBER - 24);
-	context_data * context_data_ptr = (context_data *)address;
-
-	(*context_data_ptr->ctx_ptr->start)(context_data_ptr->ctx_ptr);
-
-	/*if current current ctx returns i.e. hits the bottom of its function
-	it will return here. So, terminate the context and move on*/
-	context_terminate(context_data_ptr->ctx_ptr);
+	fatal("context_start(): need to make get stack 32\n");
 #endif
 
 	fatal("context_start(): Should never be here!\n");
@@ -439,9 +796,12 @@ void context_start(void){
 }
 
 void context_init_halt(context * my_ctx){
-	//context has completed initial run jump back to init
+
+//context has completed initial run jump back to init
+
+	//set up new context
 #if defined(__linux__) && defined(__i386__)
-	if (!setjmp32_2(my_ctx->buf))
+	if (!setjmp32_2(current_context->buf))
 	{
 	  longjmp32_2(context_init_halt_buf, 1);
 	}
@@ -453,7 +813,7 @@ void context_init_halt(context * my_ctx){
 #else
 #error Unsupported machine/OS combination
 #endif
-	return;
+
 }
 
 
@@ -513,10 +873,8 @@ void context_init(context *new_context){
 	don't move these out of this function!!!!*/
 
 	/*instruction pointer and then pointer to top of stack*/
+
 #if defined(__linux__) && defined(__i386__)
-
-	//printf("address is 0x%08x\n", ((int)((char*)new_context->stack + new_context->stacksize - MAGIC_STACK_NUMBER)));
-
 	new_context->buf[5] = ((int)context_start);
 	new_context->buf[4] = ((int)((char*)new_context->stack + new_context->stacksize - MAGIC_STACK_NUMBER));
 
@@ -538,6 +896,7 @@ void KnightSim_clean_up(void){
 	context *ctx_ptr = NULL;
 
 	//printf("KnightSim cleaning up\n");
+
 	LIST_FOR_EACH_L(ecdestroylist, i, 0)
 	{
 		ec_ptr = (eventcount*)KnightSim_list_get(ecdestroylist, i);
@@ -565,6 +924,8 @@ void KnightSim_clean_up(void){
 
 void context_destroy(context *ctx_ptr){
 
+	//printf("CTX destroying name %s count %llu\n", ctx_ptr->name, ctx_ptr->count);
+
 	assert(ctx_ptr != NULL);
 	ctx_ptr->start = NULL;
 	free(ctx_ptr->stack);
@@ -578,7 +939,12 @@ void context_destroy(context *ctx_ptr){
 
 void eventcount_destroy(eventcount *ec_ptr){
 
+	//printf("EC destroying name %s count %llu\n", ec_ptr->name, ec_ptr->count);
+
 	free(ec_ptr->name);
+	KnightSim_list_clear(ec_ptr->ctxlist);
+	KnightSim_list_free(ec_ptr->ctxlist);
+	pthread_mutex_destroy(&ec_ptr->lock);
 	free(ec_ptr);
 	ec_ptr = NULL;
 
@@ -588,7 +954,7 @@ void eventcount_destroy(eventcount *ec_ptr){
 void KnightSim_dump_queues(void){
 
 	int i = 0;
-
+	int j = 0;
 	eventcount *ec_ptr = NULL;
 	context *ctx_ptr = NULL;
 
@@ -600,15 +966,14 @@ void KnightSim_dump_queues(void){
 		ec_ptr = (eventcount*)KnightSim_list_get(ecdestroylist, i);
 
 		printf("ec name %s count %llu\n", ec_ptr->name, ec_ptr->count);
-
-		ctx_ptr = ec_ptr->ctx_list;
-
-		if(ctx_ptr)
-			printf("\tctx %s ec count %llu ctx count %llu\n",
-					ctx_ptr->name, ec_ptr->count, ctx_ptr->count);
+		LIST_FOR_EACH_L(ec_ptr->ctxlist, j, 0)
+		{
+			ctx_ptr = (context *)KnightSim_list_get(ec_ptr->ctxlist, j);
+			printf("\tslot %d ctx %s ec count %llu ctx count %llu\n",
+					j, ctx_ptr->name, ec_ptr->count, ctx_ptr->count);
+		}
 
 	}
-
 	printf("\n");
 
 	return;

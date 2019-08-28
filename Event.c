@@ -2,12 +2,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <string.h>
-
+#include <assert.h>
 #include <knightsim.h>
+
 #include <rdtsc.h>
 
-#define EVENTS 16
-#define TOTAL_CYCLES 1000001
+#define EVENTS 1024
+#define TOTAL_CYCLES 101 //add one extra cycle
 
 #define STACKSIZE 16384
 
@@ -32,7 +33,7 @@ int main(void){
 	/*starts simulation and won't return until simulation
 	is complete or all contexts complete*/
 
-	printf("KnightSim Event: Simulating %d events @ %d total\n", EVENTS, TOTAL_CYCLES - 1);
+	printf("Simulating %d events @ %d total\n", EVENTS, TOTAL_CYCLES - 1);
 
 	sim_start = rdtsc();
 
@@ -43,7 +44,7 @@ int main(void){
 	//clean up
 	KnightSim_clean_up();
 
-	printf("End simulation time %llu cycles %llu pairs %d iters %d\n", sim_time, CYCLE - 2, EVENTS, iters);
+	printf("End simulation time %llu cycles %llu events %d iters %d\n", sim_time, CYCLE - 2, EVENTS, iters);
 
 	return 1;
 }
@@ -58,7 +59,11 @@ void event_init(void){
 	{
 		memset(buff,'\0' , 100);
 		snprintf(buff, 100, "events_%d", i);
-		context_create(event, STACKSIZE, strdup(buff), i);
+
+		//printf("thread id %d\n", (i % KNIGHTSIM_THREAD_COUNT));
+		assert((i % KNIGHTSIM_THREAD_COUNT) >= 0 && (i % KNIGHTSIM_THREAD_COUNT) < KNIGHTSIM_THREAD_COUNT);
+
+		context_create(event, STACKSIZE, strdup(buff), (i % KNIGHTSIM_THREAD_COUNT), non_thread_safe);
 	}
 
 	return;
@@ -66,9 +71,9 @@ void event_init(void){
 
 
 void event(context * my_ctx){
-
-	volatile int i = 0;
-
+	//START sequential code!!!!!
+	//volatile int i = 0;
+	//END sequential code section!!!!!
 	context_init_halt(my_ctx);
 
 	while(CYCLE < TOTAL_CYCLES)
@@ -76,11 +81,7 @@ void event(context * my_ctx){
 
 		__sync_add_and_fetch(&iters, 1);
 
-		while(i < 375)
-			i++;
-
 		pause(1, my_ctx);
-		i = 0;
 	}
 
 	//context will terminate

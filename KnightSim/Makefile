@@ -1,12 +1,11 @@
-#nuber of threads
-NUM_THREADS = 4
-HASHSIZE = 16
+NUM_THREADS = 16 #number of threads
+HASHSIZE = 16 #make this your max planned number of threads
 THREADSIZE = 19 #make this max threads plus 3
 
 #compiler and linker
 CC_FLAGS_64 = -O3 -Wall -Werror #-g3
 CC_FLAGS_32 = -O3 -Wall -Werror -m32 #-g3
-CC = gcc -DNUM_THREADS=$(NUM_THREADS) -DTHREADSIZE=$(THREADSIZE) -DHASHSIZE=$(HASHSIZE)
+CC = gcc-4.8 -DNUM_THREADS=$(NUM_THREADS) -DTHREADSIZE=$(THREADSIZE) -DHASHSIZE=$(HASHSIZE)
 
 #DEsim
 LIB_NAME_64 = "libKnightSim64.a"

@@ -2,9 +2,9 @@ KNIGHTSIM_DIR = ./KnightSim/
 LIB_DIR = ./lib/
 INCLUDE_DIR = ./include/
 
-CC_FLAGS_64 = -O3 -Wall #-g3
-CC_FLAGS_32 = -O3 -Wall -m32 #-g3
-CC = gcc
+CC_FLAGS_64 = -Wall #-g3
+CC_FLAGS_32 = -Wall -m32 #-g3
+CC = gcc-4.8
 LINKER_FLAGS_64 = -lKnightSim64 -lpthread
 LINKER_FLAGS_32 = -lKnightSim32 -lpthread
 

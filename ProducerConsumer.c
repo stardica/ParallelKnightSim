@@ -1,9 +1,10 @@
+#include <knightsim.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <string.h>
+#include <assert.h>
 
-#include <knightsim.h>
 #include <rdtsc.h>
 
 #define LATENCY 1
@@ -14,8 +15,8 @@
 #define LOOP 20
 */
 
-#define NUMPAIRS 256
-#define LOOP 100
+#define NUMPAIRS 1024
+#define LOOP 100 //add one extra cycle
 
 /*
 #define NUMPAIRS 512
@@ -63,6 +64,8 @@ int main(void){
 	//user must initialize DESim
 	KnightSim_init();
 
+	//warning("need to set the thread id for each context\n");
+
 	producer_init();
 
 	consumer_init();
@@ -89,24 +92,37 @@ int main(void){
 void producer_init(void){
 
 	int i = 0;
+	int j = 0;
 	char buff[100];
+
+	int blk_size = NUMPAIRS/KNIGHTSIM_THREAD_COUNT;
 
 	//create the user defined eventcounts
 	ec_p = (eventcount**) calloc(NUMPAIRS, sizeof(eventcount*));
+
 
 	for(i = 0; i < NUMPAIRS; i++)
 	{
 		memset(buff,'\0' , 100);
 		snprintf(buff, 100, "ec_p_%d", i);
-		ec_p[i] = eventcount_create(strdup(buff));
+		ec_p[i] = eventcount_create(strdup(buff), thread_safe);
 	}
+
 
 	//create the user defined contexts
 	for(i = 0; i < NUMPAIRS; i++)
 	{
 		memset(buff,'\0' , 100);
 		snprintf(buff, 100, "producer_%d", i);
-		context_create(producer, DEFAULT_STACK_SIZE, strdup(buff), i);
+
+		context_create(producer, DEFAULT_STACK_SIZE, strdup(buff), j, thread_safe); //must provide a thread ID
+
+		if(!(i % blk_size) && i >= blk_size)
+		{
+			j++;
+		}
+
+		assert(j >= 0 && j < KNIGHTSIM_THREAD_COUNT);
 	}
 
 	return;
@@ -115,21 +131,32 @@ void producer_init(void){
 void consumer_init(void){
 
 	int i = 0;
+	int j = 0;
 	char buff[100];
+
+	int blk_size = NUMPAIRS/KNIGHTSIM_THREAD_COUNT;
 
 	ec_c = (eventcount**) calloc(NUMPAIRS, sizeof(eventcount*));
 	for(i = 0; i < NUMPAIRS; i++)
 	{
 		memset(buff,'\0' , 100);
 		snprintf(buff, 100, "ec_c_%d", i);
-		ec_c[i] = eventcount_create(strdup(buff));
+		ec_c[i] = eventcount_create(strdup(buff), thread_safe);
 	}
+
 
 	for(i = 0; i < NUMPAIRS; i++)
 	{
 		memset(buff,'\0' , 100);
 		snprintf(buff, 100, "consumer_%d", i);
-		context_create(consumer, DEFAULT_STACK_SIZE, strdup(buff), i);
+		context_create(consumer, DEFAULT_STACK_SIZE, strdup(buff), j, thread_safe);
+
+		if(!(i % blk_size) && i >= blk_size)
+		{
+			j++;
+		}
+
+		assert(j >= 0 && j < KNIGHTSIM_THREAD_COUNT);
 	}
 
 	return;
@@ -144,10 +171,10 @@ void producer(context * my_ctx){
 
 	while(j <= LOOP)
 	{
+		__sync_add_and_fetch(&iters, 1);
+
 		//do work
 		pause(1, my_ctx);
-
-		__sync_add_and_fetch(&iters, 1);
 
 		advance(ec_c[my_pid], my_ctx);
 
@@ -172,7 +199,7 @@ void consumer(context * my_ctx){
 		pause(1, my_ctx);
 		//do work
 
-		__sync_add_and_fetch(&iters, 1);
+		//__sync_add_and_fetch(&iters, 1);
 
 		advance(ec_p[my_pid], my_ctx);
 	}

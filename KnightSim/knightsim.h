@@ -61,7 +61,6 @@ int setjmp32_2(jmp_buf __env);
 void longjmp32_2(jmp_buf __env, int val);
 int encode32(int val);
 int decode32(int val);
-long long get_stack_ptr32(void);
 
 #else
 #error Unsupported machine/OS combination
@@ -76,19 +75,41 @@ struct list_t{
 	void **elem;  /* Vector of elements */
 };
 
+enum thread_safety_type{
+	non_thread_safe = 0,
+	thread_safe,
+	number_ec_types
+};
+
+typedef int bool;
+enum {false, true};
+
+typedef struct SpinLock{
+	volatile bool flag;
+}SpinLock;
+
+#define lock(spinlock) while(!__sync_bool_compare_and_swap(&spinlock.flag,false,true)) { printf("In Spin Lock\n"); }
+
+#define unlock(spinlock) (spinlock.flag = false)
+
 //Eventcount objects
 struct eventcount_t{
 	char * name;		/* string name of event count */
 	long long id;
+	enum thread_safety_type ts_type;
+	struct list_t *ctxlist;
 	count_t count;		/* current value of event */
 	struct context_t *ctx_list;
+	//SpinLock lock;
+	pthread_mutex_t lock;
 };
 
 //Context objects
 struct context_t{
 	jmp_buf buf;		/*state */
 	char *name;			/* task name */
-	int id;				/* task id */
+	int thread_id;		/* id of assigned thread */
+	enum thread_safety_type ts_type;
 	int unique_id;
 	count_t count;		/* argument to await */
 	void (*start)(struct context_t *);	/*entry point*/
@@ -96,12 +117,14 @@ struct context_t{
 	char *stack;		/*stack */
 	int stacksize;		/*stack size*/
 	struct context_t * batch_next;
+	struct context_t * batch_tail;
 };
 
 //Context objects
 struct thread_t{
 	jmp_buf home_buf;		/*state */
 	pthread_t thread;
+	int thread_id;
 };
 
 typedef struct context_t context;
@@ -110,19 +133,17 @@ typedef struct list_t list;
 typedef struct thread_t thread;
 
 struct context_data_t{
-
 	context * ctx_ptr;
-	int context_id;
+	int thread_id;
 };
-
-typedef int bool;
-enum {false, true};
 
 extern bool KnightSim_finished;
 
 typedef struct context_data_t context_data;
 
 #define MAGIC_STACK_NUMBER 4
+
+extern int KNIGHTSIM_THREAD_COUNT;
 
 extern jmp_buf main_context;
 extern jmp_buf halt_context;
@@ -140,17 +161,23 @@ extern unsigned long long etime_time;
 
 //KnightSim user level functions
 void KnightSim_init(void);
-eventcount *eventcount_create(char *name);
-void context_create(void (*func)(context *), unsigned stacksize, char *name, int id);
+//eventcount *eventcount_create(char *name);
+eventcount *eventcount_create(char *name, enum thread_safety_type type);
+//void context_create(void (*func)(context *), unsigned stacksize, char *name, int thread_id);
+void context_create(void (*func)(context *), unsigned stacksize, char *name, int thread_id,  enum thread_safety_type type);
 void simulate(void);
 void await(eventcount *ec, count_t value, context *my_ctx);
 void advance(eventcount *ec, context *my_ctx);
 void pause(count_t value, context * my_ctx);
 void context_init_halt(context * my_ctx);
+void thread_recover(void);
+
+void thread_stub(void);
 
 //KnightSim private functions
 void ctx_hash_insert(context *context_ptr, unsigned int row, unsigned int col);
-void eventcount_init(eventcount * ec, count_t count, char *ecname);
+//void eventcount_init(eventcount * ec, count_t count, char *ecname);
+void eventcount_init(eventcount * ec, count_t count, char *ecname, enum thread_safety_type type);
 void eventcount_destroy(eventcount *ec);
 void context_init(context *new_context);
 void context_start(void);
